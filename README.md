@@ -158,3 +158,16 @@ scripts/macos/probe-app.sh tap rebuild-run
 cargo build --example tap_probe
 target/debug/examples/tap_probe --info-only
 ```
+
+---
+
+## 埋め込みフォントの出典
+
+画面の日本語表示のため、以下のフォントファイルをバイナリに埋め込んでいます（SIL Open Font License 1.1）。
+
+- **ファイル**: `assets/fonts/NotoSansJP-Regular.ttf`、`assets/fonts/OFL.txt`
+- **フォント名・版**: Noto Sans JP Regular（`Version 2.004-H2;hotconv 1.0.118;makeotfexe 2.5.65603`、静的な単一ウェイト TTF、可変フォントではない）
+- **入手元 URL**:
+  - フォント本体: Google Fonts（`https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400` 経由で配布される `https://fonts.gstatic.com/s/notosansjp/v57/-F6jfjtqLzI2JPCgQBnw7HFyzSD-AsregP8VFBEj75s.ttf`、`google/fonts` リポジトリの `ofl/notosansjp` には可変フォントのみ置かれていたため、Google Fonts の静的 Regular TTF を取得。上流は `https://github.com/notofonts/noto-cjk` の `Sans2.004`）
+  - ライセンス: `https://github.com/google/fonts/blob/main/ofl/notosansjp/OFL.txt`
+- **取得日**: 2026-11-25

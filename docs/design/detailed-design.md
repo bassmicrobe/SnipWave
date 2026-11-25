@@ -1124,6 +1124,7 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 
 - 担当ファイル: `src/ui/theme.rs`、`src/ui/text.rs`、`scripts/gen-icons.sh`、`assets/icons/**`、`assets/fonts/**`、`build.rs`（exe のアイコンを有効にする）、`src/main.rs`（`with_icon` を有効にし、`debug_swatches` を一時的に呼ぶ。T3〜T5 は `main.rs`・`build.rs` を触らないので重ならない。`main.rs` は T9 に引き継ぐ）
 - 作るもの: §5.9 のトークンと `Visuals`、フォントの読み込み、§6 のアイコン一式。Noto Sans JP は Google Fonts の配布物（`https://github.com/google/fonts/tree/main/ofl/notosansjp`）から、太さが 1 つの Regular の TTF と `OFL.txt` を入れる。可変フォントしか無ければ、`https://github.com/notofonts/noto-cjk` の配布物から取る。入れたファイルの出どころと版を README に書く。
+  - 実際に入れたもの（2026-11-25）: `google/fonts` の `ofl/notosansjp` には可変フォントだけ、`notofonts/noto-cjk` の静的な版は OTF だけだったので、Google Fonts の CSS API（`https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400`）が配る静的な Regular の TTF（`Version 2.004-H2`、上流は `noto-cjk` の `Sans2.004`、約 5.4 MiB）を入れた。`OFL.txt` は `google/fonts` のもの。URL と取った日は README の「埋め込みフォントの出典」。
 - 完了条件: ダークとライトで日本語の文言が豆腐にならずに出る。`icon.icns`・`icon.ico`・各 PNG が生成されてコミットされている。
 - 確かめ方: `theme.rs` の末尾に、全トークンと文字の大きさを並べて見せる関数 `debug_swatches(ui)` を用意し、T9 までの間は `main.rs` から呼んで目で見る（ダーク / ライトを 1 回ずつ）。アイコンは Finder のプレビューで見る。
 
