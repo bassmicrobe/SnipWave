@@ -1,0 +1,13 @@
+[package]
+name = "snipwave"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+hound = "3.5"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+directories = "5.0"
+chrono = "0.4"
