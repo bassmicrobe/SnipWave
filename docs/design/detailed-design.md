@@ -207,6 +207,8 @@ scripts/gen-icons.sh              # SVG から各 OS のアイコンを作る
 assets/icons/…                    # 生成物（コミットする。§6）
 assets/fonts/NotoSansJP-Regular.ttf + OFL.txt
 examples/loopback_probe.rs        # T1 の検証（残しておく。取得の切り分けに使う）
+examples/tap_probe.rs             # T1b の検証（macOS 専用。CI の clippy --all-targets が 3 OS で通るよう、
+                                  #   macOS 以外では「macOS 専用です」と出して終わる main を cfg で用意する）
 src/
   lib.rs             # モジュールの宣言だけ（pub mod audio; pub mod config; …）。examples とテストから使うため
   main.rs            # 起動だけ: ログ、設定の読み込み、AudioEngine の開始、eframe の起動（snipwave:: 経由で使う）
@@ -382,6 +384,8 @@ pub struct OpenedCapture {
     pub device_rate: u32,
     pub device_name: String,
     pub device_id: String,                    // 既定デバイスが変わったかの比較に使う
+    #[cfg(target_os = "macos")]
+    pub tap: Option<TapAggregate>,            // 自前の Tap を使ったときだけ Some。stream より後に捨てる
 }
 
 /// 既定の出力デバイスのループバックを開いて再生（play）まで行う。
@@ -393,6 +397,26 @@ pub fn open_loopback(
 
 /// いまの既定の出力デバイスの ID（作り直しの判断に使う）。
 pub fn current_default_output_id() -> Result<String, AppError>;
+```
+
+**`audio/capture_macos_tap.rs`**（macOS だけ。`audio/mod.rs` で `#[cfg(target_os = "macos")] mod capture_macos_tap;`。T2 で下のシグネチャだけの骨組みを作り、T7b で中身を書く。T1b の `examples/tap_probe.rs` の手順を移す）
+
+```rust
+/// 自前の Process Tap と、それを含む集約デバイス。捨てると両方を破棄する。
+pub struct TapAggregate { /* Tap と集約デバイスの AudioObjectID、集約デバイスの名前 */ }
+
+impl TapAggregate {
+    /// 既定の出力デバイスを対象に、全プロセスの Tap（ミュートしない）と、
+    /// それを入れた公開の集約デバイス `SnipWave Loopback <pid>` を作る。
+    pub fn create_for_default_output() -> Result<Self, AppError>;
+    /// cpal の `host.devices()` から探すときの名前。
+    pub fn device_name(&self) -> &str;
+}
+
+impl Drop for TapAggregate { /* 集約デバイス → Tap の順に破棄する。失敗は log に出す */ }
+
+/// 前回の残骸（名前が `SnipWave Loopback` で始まる集約デバイス）を破棄し、破棄した数を返す。起動時に 1 回呼ぶ。
+pub fn destroy_stale_aggregates() -> Result<usize, AppError>;
 ```
 
 `open_loopback` の手順:
@@ -1003,7 +1027,7 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 
 ## 10. 実装のタスク
 
-順番: T1 → T2 →（T3・T4・T5・T6 は並行できる）→ T7・T8（並行できる）→ T7b（T7 のあと。T9 以降と並行できる）→ T9 → T10・T11（並行できる）→ T12。
+順番: T1 → T1b → T2 →（T3・T4・T5・T6 は並行できる）→ T7・T8（並行できる）→ T7b（T7 のあと。T9 以降と並行できる）→ T9 → T10・T11（並行できる）→ T12。
 
 **CI の回し方**: 実装者はコミットまでを行い、「CI 待ち」と報告する。push と PR の作成は取りまとめ役が行う（§13）。完了条件の「CI で通る」は、取りまとめ役が push したあとの結果で判定する。失敗したら、実装者は失敗したジョブのログをすべて受け取ってから直す。CI の結果を待つ間に、担当ファイルが重ならない次のタスクへ進んでよい。
 並行できるタスクは、担当ファイルが重ならない。`Cargo.toml` は T2 で §2.2 の依存をすべて入れ、あとのタスクでは触らない（触る必要が出たら取りまとめ役に知らせる）。
@@ -1011,13 +1035,27 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 ### T1. macOS でシステム音声が取れることの検証（最初にやる。ここが関門）
 
 - 担当ファイル: `Cargo.toml`（cpal と hound だけの最小）、`rust-toolchain.toml`、`.gitignore`、`examples/loopback_probe.rs`、`scripts/macos/probe-app.sh`、`packaging/macos/Info.ext.plist`
-- 作るもの: `loopback_probe` は、`cpal::default_host().default_output_device()` を §2.3 の決まり（既定の設定のまま）で開き、10 秒間、1 秒ごとに「届いたフレーム数・左右の最大値」を標準出力に出し、最後に `probe.wav`（デバイスのレートのまま）を書く。起動時にデバイス名・`supports_input()`・既定の設定（レート、チャンネル数、サンプル形式）も出す。`probe-app.sh` は、`cargo build --example loopback_probe` のあと `Probe.app/Contents/{MacOS,Info.plist}` を手で組み（バンドル ID `com.snipwave.Probe`、`NSAudioCaptureUsageDescription` 入り）、`codesign --force --sign -` で ad-hoc 署名する。
+- 作るもの: `loopback_probe` は、`cpal::default_host().default_output_device()` を §2.3 の決まり（既定の設定のまま）で開き、10 秒間、1 秒ごとに「届いたフレーム数・左右の最大値」を標準出力に出し、最後に `probe.wav`（デバイスのレートのまま）を書く。起動時にデバイス名・`supports_input()`・既定の設定（レート、チャンネル数、サンプル形式）も出す。**試験音**: 取得を始めて 2 秒後に、997 Hz・-12 dBFS・3 秒の正弦波の WAV（hound で一時フォルダに書く）を `afplay` で鳴らす。終わったら、試験音の区間と、その前の区間それぞれについて「997 Hz の成分（Goertzel）の振幅 ÷ (√2 × RMS)」を出す（純音だけなら 1.0 に近く、マイクの雑音や別の音なら小さい）。`probe-app.sh` は、`cargo build --example loopback_probe` のあと `Probe.app/Contents/{MacOS,Info.plist}` を手で組み（バンドル ID `com.snipwave.Probe`、`NSAudioCaptureUsageDescription` 入り）、`codesign --force --sign -` で ad-hoc 署名する。
 - 完了条件:
-  1. 音楽を鳴らした状態で `Probe.app` を起動し、**最大値が 0 より大きい**行が出る（0 のままなら失敗。エラーが出なくても成功ではない）。
-  2. `probe.wav` を再生して、鳴らしていた音が入っている。
+  0. 既定の出力デバイスが **出力だけのデバイス**（`supports_input()` が偽。内蔵スピーカーやヘッドホン）になっている。真なら cpal はマイク側を録るので T1 の判定にならない。出力先を切り替えてやり直す（入出力一体のデバイスは T1b で確かめる）。
+  1. `Probe.app` を起動し、**試験音の区間で最大値が 0 より大きく、997 Hz の割合が 0.7 以上**、その前の区間（ほかに音を鳴らしていなければ無音）では 997 Hz の割合が小さい（0 のままなら失敗。エラーが出なくても成功ではない）。
+  2. `probe.wav` を聞いて、試験音が入っている。
   3. 次を確かめて、結果を §3.3 と README に書く: 許可のダイアログが出たタイミングと表示名／ターミナルから `target/debug/examples/loopback_probe` を直接動かしたときの動き（どのアプリに許可が付くか、音が取れるか）／作り直して再署名したあとに許可が残るか／システム設定の項目の日本語の表記／開発機の既定の出力デバイスの `supports_input()` の値／検証の前後で、Audio MIDI 設定に出る出力デバイスのフォーマット（レート、ビット数）が変わっていないこと（cpal は既定の設定で開いても `set_physical_format` を呼ぶため）。変わっていたら報告する。
-- 確かめ方: 上の 1〜3 を手で。CI はまだ無い。
+- 確かめ方: 上の 0〜3 を手で。CI はまだ無い。**許可のダイアログを押すこと、`probe.wav` を耳で聞くこと、システム設定の表記を見ることは、依頼者が Mac の前で行う**。実装者はその手前で止め、取りまとめ役に「依頼者に頼むこと」として手順を渡す（標準出力の数値は実装者が読んでよい）。
 - **関門**: 1 が通らなければ、先へ進まずに取りまとめ役へ報告する（代替は §11 R1・R2）。
+
+### T1b. 自前の Tap が cpal から開けることの検証（T1 のあと。ここも関門）
+
+§12-5 で入出力一体のデバイスへの対応を v0.1 に入れると決めたが、その方式（§11 R1 の代替 A: 自前の Tap ＋ 公開の集約デバイスを cpal から名前で開く）は、まだ動くと確かめていない。T2 以降を積む前に、最小の形で確かめる。
+
+- 担当ファイル: `examples/tap_probe.rs`、`Cargo.toml`（T1 の最小の依存に、§2.2 の「macOS の自前の Tap」の行を足す。T2 の前なので触ってよい）、`scripts/macos/probe-app.sh`（`tap_probe` の `.app` も作れるようにする）
+- 作るもの: `tap_probe` は、`objc2-core-audio` で既定の出力デバイスを対象に Tap（全プロセス、ミュートしない）と、それを入れた公開の集約デバイス `SnipWave Loopback <pid>` を作り、`cpal::default_host().devices()` から名前で探して `build_input_stream` で開く。あとは T1 の `loopback_probe` と同じ（10 秒取得、試験音、997 Hz の割合、`probe.wav`）。終わったら集約デバイスと Tap を破棄し、Audio MIDI 設定に残っていないことを確かめる。手順の手本は cpal-0.18.2 の `src/host/coreaudio/macos/loopback.rs`。
+- 完了条件:
+  1. **入出力一体のデバイスが既定の出力**（`supports_input()` が真）の状態で、T1 の完了条件 1・2 と同じ結果になる。依頼者のオーディオインターフェイスをつないで試す。手元に無ければ、Audio MIDI 設定で「機器セット」（スピーカー＋マイク）を作って既定の出力にする。
+  2. 取得のあと、`SnipWave Loopback` の集約デバイスが残っていない。
+  3. 出力だけのデバイスでも同じ結果になる（cpal 任せの T1 と同じに取れる）。
+- 確かめ方: 上を手で 1 回。T1 と同じく、許可のダイアログ・耳での確認・オーディオインターフェイスの接続は依頼者が行う。
+- **関門**: 1 が通らなければ、先へ進まずに取りまとめ役へ報告する。§12-5 の決定（v0.1 で対応する）を依頼者に決め直してもらう。
 
 ### T2. 骨組みと CI
 
@@ -1059,8 +1097,8 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 
 ### T7b. macOS の入出力一体デバイスへの対応（T7 のあと。§12-5 の決定で v0.1 に入れる）
 
-- 担当ファイル: `src/audio/capture_macos_tap.rs`（新規）、`src/audio/capture.rs`（macOS の分岐 1 か所）、README（対応するデバイスの説明）。依存（§2.2 の「macOS の自前の Tap」の行）は T2 で `Cargo.toml` に入っているので、このタスクでは `Cargo.toml` を触らない
-- 作るもの: §11 R1 の代替 A。cpal-0.18.2 の `src/host/coreaudio/macos/loopback.rs` を手本に、Tap（全プロセス、ミュートしない）と、その Tap を入れた集約デバイス（名前 `SnipWave Loopback <pid>`、非公開にしない）を作る。`host.devices()` から名前で探し、普通の入力デバイスとして `build_input_stream` で開く。ストリームを捨てるとき・終了時に集約デバイスと Tap を破棄し、起動時に `SnipWave Loopback` で始まる残骸があれば破棄する。
+- 担当ファイル: `src/audio/capture_macos_tap.rs`（T2 の骨組みに中身を書く）、`src/audio/capture.rs`（macOS の分岐 1 か所）。依存（§2.2 の「macOS の自前の Tap」の行）は T2 で `Cargo.toml` に入っているので、このタスクでは `Cargo.toml` を触らない。README は T11 と重なるので触らない（対応するデバイスの説明は報告に書き、README への反映は T12 で行う）
+- 作るもの: §11 R1 の代替 A。T1b の `examples/tap_probe.rs` で確かめた手順を、§4.6 の `TapAggregate` の形に移す。cpal-0.18.2 の `src/host/coreaudio/macos/loopback.rs` を手本に、Tap（全プロセス、ミュートしない）と、その Tap を入れた集約デバイス（名前 `SnipWave Loopback <pid>`、非公開にしない）を作る。`host.devices()` から名前で探し、普通の入力デバイスとして `build_input_stream` で開く。ストリームを捨てるとき・終了時に集約デバイスと Tap を破棄し、起動時に `SnipWave Loopback` で始まる残骸があれば破棄する。
 - 完了条件: 入力も持つデバイスを既定の出力にした状態で、T7 と同じ確認（最大値が 0 より大きい、`snapshot_last` に鳴らした音が入る）が通る。出力だけのデバイスでの動きが変わっていない。
 - 確かめ方: T7 の `loopback_probe` を `.app` で 1 回。入出力一体のデバイスが手元に無いときは、Audio MIDI 設定で「機器セット」（スピーカー＋マイク）を作って既定の出力にして試す。それでも `supports_input()` が真にならなければ、確かめられなかったこととして報告する。
 
@@ -1091,7 +1129,7 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 ### T12. 計測と仕上げ
 
 - 担当ファイル: `README.md`、`docs/design/detailed-design.md`（測った値と、作ってみて変えた点）
-- すること: §4.8 の測り方で、`Idle`（ウィンドウを隠す / 表示）の CPU とメモリを測る。ウィンドウを隠したまま 30 分取得を続け、捨てたフレーム数が 0 のままかを見る（macOS の省電力でワーカーが止められないかの確認）。300 秒の Catch と書き出しにかかる時間を測る。
+- すること: T7b・T10 の報告にあった、README に書く内容（対応するデバイス、トレイとホットキーの動き）を README に入れる。§4.8 の測り方で、`Idle`（ウィンドウを隠す / 表示）の CPU とメモリを測る。ウィンドウを隠したまま 30 分取得を続け、捨てたフレーム数が 0 のままかを見る（macOS の省電力でワーカーが止められないかの確認）。300 秒の Catch と書き出しにかかる時間を測る。
 - 完了条件: 測った値が README と §4.8 に書いてある。目標（CPU 1〜3%、メモリ 150MB）を外れた項目は、値と一緒に取りまとめ役へ報告してある。
 
 ---
