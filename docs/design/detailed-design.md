@@ -74,7 +74,7 @@ PC で鳴っている音（システム音声）を取り込み、波形で範�
 | グローバルホットキー | `global-hotkey` | 0.10.0 | 2026-11-09 | 1.77 | Windows / macOS / Linux は **X11 のみ** |
 | トレイ | `tray-icon` | 0.26.1 | 2026-10-07 | 1.90 | Linux は `default-features = false`、features = `ksni`（GTK のイベントループが要らない） |
 | フォルダ選択 | `rfd` | 0.18.0 | 2026-11-07 | 1.92 | 既定の features（Linux は xdg-portal） |
-| 設定の保存 | `serde` 1.0.229 / `toml` 1.2.2 / `directories` 6.0.0 | — | — | 1.85（toml） | 仕様の toml 0.8・directories 5.0 から上げる |
+| 設定の保存 | `serde` 1.0.229 / `toml` 1.2.3 / `directories` 6.0.0 | — | — | 1.85（toml） | 仕様の toml 0.8・directories 5.0 から上げる |
 | 日時 | `chrono` | 0.4.45 | — | 1.62 | `default-features = false`、features = `clock` |
 | エラー型 | `thiserror` | 2.0.21 | — | 1.77 | |
 | ログ | `log` 0.4.35 / `env_logger` 0.11.12 | — | — | 1.85 | 標準エラーへ。画面の状態表示の代わりにはしない |
