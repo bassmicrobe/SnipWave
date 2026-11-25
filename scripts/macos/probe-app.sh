@@ -1,16 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# T1 検証用 Probe.app の組み立て・署名・起動スクリプト
+# T1 / T1b 検証用 .app の組み立て・署名・起動スクリプト
 # 使い方:
-#   scripts/macos/probe-app.sh build   # ビルド・.app 組み立て・ad-hoc 署名のみ（既定）
-#   scripts/macos/probe-app.sh run     # 上に加えて起動し、ログと probe.wav を target/probe/loopback/ に残す
+#   scripts/macos/probe-app.sh [loopback|tap] [build|run]
+#   scripts/macos/probe-app.sh [build|run]        # 省略時は loopback
+# 例:
+#   scripts/macos/probe-app.sh build              # Probe.app (loopback_probe) を組み立て・署名
+#   scripts/macos/probe-app.sh run                # Probe.app を起動（target/probe/loopback/ に出力）
+#   scripts/macos/probe-app.sh tap build          # TapProbe.app (tap_probe) を組み立て・署名
+#   scripts/macos/probe-app.sh tap run            # TapProbe.app を起動（target/probe/tap/ に出力）
 
-MODE="${1:-build}"
+TARGET="loopback"
+MODE="build"
+
+case "${1:-}" in
+  "")
+    ;;
+  build|run)
+    MODE="$1"
+    ;;
+  loopback|tap)
+    TARGET="$1"
+    MODE="${2:-build}"
+    ;;
+  *)
+    echo "使い方: $0 [loopback|tap] [build|run]" >&2
+    exit 1
+    ;;
+esac
+
 case "$MODE" in
   build|run) ;;
   *)
-    echo "使い方: $0 [build|run]" >&2
+    echo "使い方: $0 [loopback|tap] [build|run]" >&2
     exit 1
     ;;
 esac
@@ -18,9 +41,15 @@ esac
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-EXAMPLE_NAME="loopback_probe"
-APP_NAME="Probe"
-BUNDLE_ID="com.snipwave.Probe"
+if [ "$TARGET" = "loopback" ]; then
+  EXAMPLE_NAME="loopback_probe"
+  APP_NAME="Probe"
+  BUNDLE_ID="com.snipwave.Probe"
+else
+  EXAMPLE_NAME="tap_probe"
+  APP_NAME="TapProbe"
+  BUNDLE_ID="com.snipwave.TapProbe"
+fi
 
 PROBE_ROOT="$REPO_ROOT/target/probe"
 APP_DIR="$PROBE_ROOT/${APP_NAME}.app"
@@ -29,7 +58,7 @@ MACOS_DIR="$CONTENTS_DIR/MacOS"
 INFO_PLIST="$CONTENTS_DIR/Info.plist"
 INFO_EXT_PLIST="$REPO_ROOT/packaging/macos/Info.ext.plist"
 
-OUT_DIR="$PROBE_ROOT/loopback"
+OUT_DIR="$PROBE_ROOT/$TARGET"
 WAV_PATH="$OUT_DIR/probe.wav"
 STDOUT_LOG="$OUT_DIR/stdout.log"
 STDERR_LOG="$OUT_DIR/stderr.log"
@@ -95,7 +124,7 @@ echo "==> 完了: $APP_DIR"
 
 if [ "$MODE" = "build" ]; then
   echo "起動するには次を実行してください:"
-  echo "  scripts/macos/probe-app.sh run"
+  echo "  scripts/macos/probe-app.sh $TARGET run"
   exit 0
 fi
 

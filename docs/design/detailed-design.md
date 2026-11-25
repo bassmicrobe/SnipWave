@@ -1076,7 +1076,11 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 
 §12-5 で入出力一体のデバイスへの対応を v0.1 に入れると決めたが、その方式（§11 R1 の代替 A: 自前の Tap ＋ 集約デバイスを cpal から名前で開く）は、まだ動くと確かめていない。T2 以降を積む前に、最小の形で確かめる。
 
-- 担当ファイル: `examples/tap_probe.rs`、`Cargo.toml`（T1 の最小の依存に、§2.2 の「macOS の自前の Tap」の行を足す。T2 の前なので触ってよい）、`scripts/macos/probe-app.sh`（`tap_probe` の `.app` も作れるようにする）、`README.md` と `docs/design/detailed-design.md`（確かめた結果。T1 のあとなので重ならない）
+- 担当ファイル: `examples/tap_probe.rs`、`Cargo.toml`（T1 の最小の依存に、§2.2 の「macOS の自前の Tap」の行を足す。T2 の前なので触ってよい）、`Cargo.lock`、`scripts/macos/probe-app.sh`（`tap_probe` の `.app` も作れるようにする）、`README.md` と `docs/design/detailed-design.md`（確かめた結果。T1 のあとなので重ならない）
+- 実装上の決定:
+  - macOS 用の依存（`objc2` / `objc2-core-audio` / `objc2-core-foundation` / `objc2-foundation` / `libc`）は `[target.'cfg(target_os = "macos")'.dependencies]` に置き、`examples/tap_probe.rs` も `#[cfg(target_os = "macos")]` で分けて 3 OS でビルド・clippy が通る形にする。
+  - `scripts/macos/probe-app.sh tap [build|run]` で `target/probe/TapProbe.app`（バンドル ID `com.snipwave.TapProbe`、`NSAudioCaptureUsageDescription` 入り）を組み立て・署名・起動できるようにする。ログと `probe.wav` は `target/probe/tap/` の下に出力する。
+  - 非公開（`kAudioAggregateDeviceIsPrivateKey = YES`）で作成後、`cpal::Host::devices()` の反映待ちを考慮して短時間リトライ（50ms × 最大 10 回）で名前探索し、見つからなければ非公開の集約デバイスと Tap を破棄してから公開（`NO`）で作り直す。終了時はストリーム破棄のあとに集約デバイス → Tap の順で破棄し、`devices()` に残っていないこともログに出す。
 - 作るもの: `tap_probe` は、`objc2-core-audio` で既定の出力デバイスを対象に Tap（全プロセス、ミュートしない）と、それを入れた集約デバイス `SnipWave Loopback <pid>` を作り、`cpal::default_host().devices()` から名前で探して `build_input_stream` で開く。**まず非公開**（`kAudioAggregateDeviceIsPrivateKey` = YES。作ったプロセスからだけ見える）で作って `devices()` に出るかを確かめ、出なければ公開で作り直す（§12-14）。どちらで通ったかを報告し、T7b はその作り方に固定する。あとは T1 の `loopback_probe` と同じ（10 秒取得、試験音、997 Hz の割合、`probe.wav`）。終わったら集約デバイスと Tap を破棄し、Audio MIDI 設定に残っていないことを確かめる。手順の手本は cpal-0.18.2 の `src/host/coreaudio/macos/loopback.rs`。
 - 完了条件:
   1. **入出力一体のデバイスが既定の出力**（`supports_input()` が真）の状態で、T1 の完了条件 1・2 と同じ結果になる。依頼者のオーディオインターフェイスをつないで試す。手元に無ければ、Audio MIDI 設定で「機器セット」（スピーカー＋マイク）を作って既定の出力にする。
