@@ -2,8 +2,11 @@
 //!
 //! 使い方:
 //!   cargo build --example loopback_probe
-//!   scripts/macos/probe-app.sh build   # Probe.app を組み立てて ad-hoc 署名する
-//!   scripts/macos/probe-app.sh run     # Probe.app を起動してログと probe.wav を残す
+//!   scripts/macos/probe-app.sh build        # Probe.app を組み立てて ad-hoc 署名する
+//!   scripts/macos/probe-app.sh run          # Probe.app を起動して probe.log / probe.wav を残す
+//!   scripts/macos/probe-app.sh rebuild      # ビルドスタンプを更新して組み立て・再署名する
+//!   scripts/macos/probe-app.sh rebuild-run  # ビルドスタンプを更新して再署名・起動する（rebuild.log / rebuild.wav）
+//!   scripts/macos/probe-app.sh direct       # バイナリを直接実行して direct.log / direct.wav を残す
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -28,12 +31,17 @@ mod macos {
     use std::io::ErrorKind;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command};
-    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use cpal::{FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig};
+
+    const BUILD_STAMP: &str = match option_env!("SNIPWAVE_PROBE_BUILD_STAMP") {
+        Some(stamp) => stamp,
+        None => "default",
+    };
 
     const CAPTURE_SECONDS: u64 = 10;
     const BUFFER_CAPACITY_SECONDS: usize = 15;
@@ -42,6 +50,64 @@ mod macos {
     const TONE_FREQ_HZ: f64 = 997.0;
     const TONE_DBFS: f64 = -12.0;
     const TONE_SAMPLE_RATE: u32 = 48_000;
+
+    const STREAM_ERROR_NONE: u8 = 0;
+    const STREAM_ERROR_DEVICE_BUSY: u8 = 1;
+    const STREAM_ERROR_DEVICE_CHANGED: u8 = 2;
+    const STREAM_ERROR_DEVICE_NOT_AVAILABLE: u8 = 3;
+    const STREAM_ERROR_HOST_UNAVAILABLE: u8 = 4;
+    const STREAM_ERROR_INVALID_INPUT: u8 = 5;
+    const STREAM_ERROR_PERMISSION_DENIED: u8 = 6;
+    const STREAM_ERROR_REALTIME_DENIED: u8 = 7;
+    const STREAM_ERROR_RESOURCE_EXHAUSTED: u8 = 8;
+    const STREAM_ERROR_STREAM_INVALIDATED: u8 = 9;
+    const STREAM_ERROR_UNSUPPORTED_CONFIG: u8 = 10;
+    const STREAM_ERROR_UNSUPPORTED_OPERATION: u8 = 11;
+    const STREAM_ERROR_XRUN: u8 = 12;
+    const STREAM_ERROR_BACKEND_ERROR: u8 = 13;
+    const STREAM_ERROR_OTHER: u8 = 14;
+    const STREAM_ERROR_UNKNOWN: u8 = 255;
+
+    fn encode_error_kind(kind: cpal::ErrorKind) -> u8 {
+        match kind {
+            cpal::ErrorKind::DeviceBusy => STREAM_ERROR_DEVICE_BUSY,
+            cpal::ErrorKind::DeviceChanged => STREAM_ERROR_DEVICE_CHANGED,
+            cpal::ErrorKind::DeviceNotAvailable => STREAM_ERROR_DEVICE_NOT_AVAILABLE,
+            cpal::ErrorKind::HostUnavailable => STREAM_ERROR_HOST_UNAVAILABLE,
+            cpal::ErrorKind::InvalidInput => STREAM_ERROR_INVALID_INPUT,
+            cpal::ErrorKind::PermissionDenied => STREAM_ERROR_PERMISSION_DENIED,
+            cpal::ErrorKind::RealtimeDenied => STREAM_ERROR_REALTIME_DENIED,
+            cpal::ErrorKind::ResourceExhausted => STREAM_ERROR_RESOURCE_EXHAUSTED,
+            cpal::ErrorKind::StreamInvalidated => STREAM_ERROR_STREAM_INVALIDATED,
+            cpal::ErrorKind::UnsupportedConfig => STREAM_ERROR_UNSUPPORTED_CONFIG,
+            cpal::ErrorKind::UnsupportedOperation => STREAM_ERROR_UNSUPPORTED_OPERATION,
+            cpal::ErrorKind::Xrun => STREAM_ERROR_XRUN,
+            cpal::ErrorKind::BackendError => STREAM_ERROR_BACKEND_ERROR,
+            cpal::ErrorKind::Other => STREAM_ERROR_OTHER,
+            _ => STREAM_ERROR_UNKNOWN,
+        }
+    }
+
+    fn decode_error_kind(code: u8) -> &'static str {
+        match code {
+            STREAM_ERROR_NONE => "None",
+            STREAM_ERROR_DEVICE_BUSY => "DeviceBusy",
+            STREAM_ERROR_DEVICE_CHANGED => "DeviceChanged",
+            STREAM_ERROR_DEVICE_NOT_AVAILABLE => "DeviceNotAvailable",
+            STREAM_ERROR_HOST_UNAVAILABLE => "HostUnavailable",
+            STREAM_ERROR_INVALID_INPUT => "InvalidInput",
+            STREAM_ERROR_PERMISSION_DENIED => "PermissionDenied",
+            STREAM_ERROR_REALTIME_DENIED => "RealtimeDenied",
+            STREAM_ERROR_RESOURCE_EXHAUSTED => "ResourceExhausted",
+            STREAM_ERROR_STREAM_INVALIDATED => "StreamInvalidated",
+            STREAM_ERROR_UNSUPPORTED_CONFIG => "UnsupportedConfig",
+            STREAM_ERROR_UNSUPPORTED_OPERATION => "UnsupportedOperation",
+            STREAM_ERROR_XRUN => "Xrun",
+            STREAM_ERROR_BACKEND_ERROR => "BackendError",
+            STREAM_ERROR_OTHER => "Other",
+            _ => "Unknown",
+        }
+    }
 
     struct Args {
         output: Option<PathBuf>,
@@ -54,6 +120,8 @@ mod macos {
         written_frames: AtomicUsize,
         dropped_frames: AtomicU64,
         stream_error: AtomicBool,
+        stream_error_kind: AtomicU8,
+        stream_error_count: AtomicU64,
     }
 
     impl CaptureBuffer {
@@ -69,6 +137,8 @@ mod macos {
                 written_frames: AtomicUsize::new(0),
                 dropped_frames: AtomicU64::new(0),
                 stream_error: AtomicBool::new(false),
+                stream_error_kind: AtomicU8::new(STREAM_ERROR_NONE),
+                stream_error_count: AtomicU64::new(0),
             }
         }
 
@@ -121,6 +191,7 @@ mod macos {
         let supports_output = device.supports_output();
 
         println!("=== loopback_probe (T1) ===");
+        println!("build_stamp: {BUILD_STAMP}");
         println!("default_output_device: {device_name}");
         println!("device_id: {device_id}");
         println!("supports_input: {supports_input}");
@@ -251,9 +322,14 @@ mod macos {
         let total_frames = capture.written_frames.load(Ordering::Acquire);
         let dropped_frames = capture.dropped_frames.load(Ordering::Relaxed);
         let stream_error = capture.stream_error.load(Ordering::Acquire);
+        let stream_error_kind =
+            decode_error_kind(capture.stream_error_kind.load(Ordering::Acquire));
+        let stream_error_count = capture.stream_error_count.load(Ordering::Relaxed);
         println!("total_frames: {total_frames}");
         println!("dropped_frames: {dropped_frames}");
         println!("stream_error: {stream_error}");
+        println!("stream_error_kind: {stream_error_kind}");
+        println!("stream_error_count: {stream_error_count}");
 
         match device.default_output_config() {
             Ok(after_cfg) => {
@@ -495,7 +571,19 @@ mod macos {
                             .fetch_add(dropped, Ordering::Relaxed);
                     }
                 },
-                move |_err| {
+                move |err| {
+                    let kind_code = encode_error_kind(err.kind());
+                    match err_capture.stream_error_kind.compare_exchange(
+                        STREAM_ERROR_NONE,
+                        kind_code,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) | Err(_) => {}
+                    }
+                    err_capture
+                        .stream_error_count
+                        .fetch_add(1, Ordering::Relaxed);
                     err_capture.stream_error.store(true, Ordering::Release);
                 },
                 None,

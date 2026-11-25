@@ -2,8 +2,10 @@
 //!
 //! 使い方:
 //!   cargo build --example tap_probe
-//!   scripts/macos/probe-app.sh tap build   # TapProbe.app を組み立てて ad-hoc 署名する
-//!   scripts/macos/probe-app.sh tap run     # TapProbe.app を起動してログと probe.wav を残す
+//!   scripts/macos/probe-app.sh tap build        # TapProbe.app を組み立てて ad-hoc 署名する
+//!   scripts/macos/probe-app.sh tap run          # TapProbe.app を起動して probe.log / probe.wav を残す
+//!   scripts/macos/probe-app.sh tap rebuild      # ビルドスタンプを更新して組み立て・再署名する
+//!   scripts/macos/probe-app.sh tap rebuild-run  # ビルドスタンプを更新して再署名・起動する
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -31,7 +33,7 @@ mod macos {
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command};
     use std::ptr::{self, NonNull};
-    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -58,6 +60,11 @@ mod macos {
     };
     use objc2_foundation::{NSArray, NSNumber, NSString};
 
+    const BUILD_STAMP: &str = match option_env!("SNIPWAVE_PROBE_BUILD_STAMP") {
+        Some(stamp) => stamp,
+        None => "default",
+    };
+
     const CAPTURE_SECONDS: u64 = 10;
     const BUFFER_CAPACITY_SECONDS: usize = 15;
     const TONE_START_SECOND: u64 = 2;
@@ -67,6 +74,64 @@ mod macos {
     const TONE_SAMPLE_RATE: u32 = 48_000;
     const DEVICE_LOOKUP_ATTEMPTS: usize = 10;
     const DEVICE_LOOKUP_INTERVAL_MS: u64 = 50;
+
+    const STREAM_ERROR_NONE: u8 = 0;
+    const STREAM_ERROR_DEVICE_BUSY: u8 = 1;
+    const STREAM_ERROR_DEVICE_CHANGED: u8 = 2;
+    const STREAM_ERROR_DEVICE_NOT_AVAILABLE: u8 = 3;
+    const STREAM_ERROR_HOST_UNAVAILABLE: u8 = 4;
+    const STREAM_ERROR_INVALID_INPUT: u8 = 5;
+    const STREAM_ERROR_PERMISSION_DENIED: u8 = 6;
+    const STREAM_ERROR_REALTIME_DENIED: u8 = 7;
+    const STREAM_ERROR_RESOURCE_EXHAUSTED: u8 = 8;
+    const STREAM_ERROR_STREAM_INVALIDATED: u8 = 9;
+    const STREAM_ERROR_UNSUPPORTED_CONFIG: u8 = 10;
+    const STREAM_ERROR_UNSUPPORTED_OPERATION: u8 = 11;
+    const STREAM_ERROR_XRUN: u8 = 12;
+    const STREAM_ERROR_BACKEND_ERROR: u8 = 13;
+    const STREAM_ERROR_OTHER: u8 = 14;
+    const STREAM_ERROR_UNKNOWN: u8 = 255;
+
+    fn encode_error_kind(kind: cpal::ErrorKind) -> u8 {
+        match kind {
+            cpal::ErrorKind::DeviceBusy => STREAM_ERROR_DEVICE_BUSY,
+            cpal::ErrorKind::DeviceChanged => STREAM_ERROR_DEVICE_CHANGED,
+            cpal::ErrorKind::DeviceNotAvailable => STREAM_ERROR_DEVICE_NOT_AVAILABLE,
+            cpal::ErrorKind::HostUnavailable => STREAM_ERROR_HOST_UNAVAILABLE,
+            cpal::ErrorKind::InvalidInput => STREAM_ERROR_INVALID_INPUT,
+            cpal::ErrorKind::PermissionDenied => STREAM_ERROR_PERMISSION_DENIED,
+            cpal::ErrorKind::RealtimeDenied => STREAM_ERROR_REALTIME_DENIED,
+            cpal::ErrorKind::ResourceExhausted => STREAM_ERROR_RESOURCE_EXHAUSTED,
+            cpal::ErrorKind::StreamInvalidated => STREAM_ERROR_STREAM_INVALIDATED,
+            cpal::ErrorKind::UnsupportedConfig => STREAM_ERROR_UNSUPPORTED_CONFIG,
+            cpal::ErrorKind::UnsupportedOperation => STREAM_ERROR_UNSUPPORTED_OPERATION,
+            cpal::ErrorKind::Xrun => STREAM_ERROR_XRUN,
+            cpal::ErrorKind::BackendError => STREAM_ERROR_BACKEND_ERROR,
+            cpal::ErrorKind::Other => STREAM_ERROR_OTHER,
+            _ => STREAM_ERROR_UNKNOWN,
+        }
+    }
+
+    fn decode_error_kind(code: u8) -> &'static str {
+        match code {
+            STREAM_ERROR_NONE => "None",
+            STREAM_ERROR_DEVICE_BUSY => "DeviceBusy",
+            STREAM_ERROR_DEVICE_CHANGED => "DeviceChanged",
+            STREAM_ERROR_DEVICE_NOT_AVAILABLE => "DeviceNotAvailable",
+            STREAM_ERROR_HOST_UNAVAILABLE => "HostUnavailable",
+            STREAM_ERROR_INVALID_INPUT => "InvalidInput",
+            STREAM_ERROR_PERMISSION_DENIED => "PermissionDenied",
+            STREAM_ERROR_REALTIME_DENIED => "RealtimeDenied",
+            STREAM_ERROR_RESOURCE_EXHAUSTED => "ResourceExhausted",
+            STREAM_ERROR_STREAM_INVALIDATED => "StreamInvalidated",
+            STREAM_ERROR_UNSUPPORTED_CONFIG => "UnsupportedConfig",
+            STREAM_ERROR_UNSUPPORTED_OPERATION => "UnsupportedOperation",
+            STREAM_ERROR_XRUN => "Xrun",
+            STREAM_ERROR_BACKEND_ERROR => "BackendError",
+            STREAM_ERROR_OTHER => "Other",
+            _ => "Unknown",
+        }
+    }
 
     struct Args {
         output: Option<PathBuf>,
@@ -79,6 +144,8 @@ mod macos {
         written_frames: AtomicUsize,
         dropped_frames: AtomicU64,
         stream_error: AtomicBool,
+        stream_error_kind: AtomicU8,
+        stream_error_count: AtomicU64,
     }
 
     impl CaptureBuffer {
@@ -94,6 +161,8 @@ mod macos {
                 written_frames: AtomicUsize::new(0),
                 dropped_frames: AtomicU64::new(0),
                 stream_error: AtomicBool::new(false),
+                stream_error_kind: AtomicU8::new(STREAM_ERROR_NONE),
+                stream_error_count: AtomicU64::new(0),
             }
         }
 
@@ -141,6 +210,9 @@ mod macos {
             let processes: Retained<NSArray<NSNumber>> = NSArray::new();
             let device_uid_ns = NSString::from_str(target_device_uid);
 
+            // SAFETY: `CATapDescription::alloc()` で確保した未初期化インスタンスに対し、
+            // 有効な `NSArray<NSNumber>`（空配列）・`NSString`（対象デバイス UID）・
+            // ストリーム番号 0 を渡して `initWithProcesses:andDeviceUID:withStream:` を 1 回だけ呼ぶ。
             let tap_desc = unsafe {
                 CATapDescription::initWithProcesses_andDeviceUID_withStream(
                     CATapDescription::alloc(),
@@ -149,6 +221,8 @@ mod macos {
                     0,
                 )
             };
+            // SAFETY: `tap_desc` は初期化済みの有効な `CATapDescription` であり、
+            // 各セッタに有効な列挙値・`NSString`・真偽値を渡している。
             unsafe {
                 tap_desc.setMuteBehavior(CATapMuteBehavior::Unmuted);
                 tap_desc.setName(&NSString::from_str(&tap_name));
@@ -157,6 +231,9 @@ mod macos {
             }
 
             let mut tap_id_uninit: MaybeUninit<AudioObjectID> = MaybeUninit::uninit();
+            // SAFETY: `tap_desc` は初期化済みの有効な `CATapDescription`、
+            // `tap_id_uninit.as_mut_ptr()` は書き込み可能な `AudioObjectID` への有効なポインタであり、
+            // `status == kAudioHardwareNoError` のときに限って CoreAudio が書き込んだ値を `assume_init()` する。
             let tap_id = unsafe {
                 let status = AudioHardwareCreateProcessTap(
                     Some(tap_desc.as_ref()),
@@ -170,6 +247,8 @@ mod macos {
                 tap_id_uninit.assume_init()
             };
 
+            // SAFETY: `tap_desc` は初期化済みの有効な `CATapDescription` であり、
+            // `UUID` とその `UUIDString` を読み取るだけである。
             let tap_uid = unsafe { tap_desc.UUID().UUIDString() };
             let properties =
                 match build_aggregate_properties(&tap_uid, &agg_uid, &device_name, is_private) {
@@ -181,6 +260,8 @@ mod macos {
                 };
 
             let mut aggregate_device_id: AudioObjectID = 0;
+            // SAFETY: `properties` は有効な `CFDictionary`、`aggregate_device_id` は
+            // 書き込み可能な `AudioObjectID` への有効な非 NULL ポインタである。
             let status = unsafe {
                 AudioHardwareCreateAggregateDevice(
                     properties.as_ref(),
@@ -213,6 +294,8 @@ mod macos {
 
     impl Drop for TapAggregate {
         fn drop(&mut self) {
+            // SAFETY: `self.aggregate_device_id` は `AudioHardwareCreateAggregateDevice` が
+            // 成功時に返した有効な ID であり、`Drop` は 1 回しか呼ばれないため二重破棄にならない。
             let agg_status =
                 unsafe { AudioHardwareDestroyAggregateDevice(self.aggregate_device_id) };
             if agg_status != kAudioHardwareNoError {
@@ -226,6 +309,8 @@ mod macos {
     }
 
     fn destroy_tap_or_log(tap_id: AudioObjectID) {
+        // SAFETY: `tap_id` は `AudioHardwareCreateProcessTap` が成功時に返した有効な ID であり、
+        // 作成失敗時のロールバックまたは `Drop` のいずれかで 1 回だけ破棄する。
         let tap_status = unsafe { AudioHardwareDestroyProcessTap(tap_id) };
         if tap_status != kAudioHardwareNoError {
             eprintln!(
@@ -235,6 +320,8 @@ mod macos {
     }
 
     fn to_cfstring(cstr: &'static CStr) -> Result<CFRetained<CFString>, String> {
+        // SAFETY: `cstr` は `'static` かつ NUL 終端の有効な UTF-8 C 文字列であり、
+        // `kCFAllocatorDefault` と UTF-8 エンコーディングを指定して `CFString::with_c_string` を呼ぶ。
         unsafe {
             CFString::with_c_string(
                 kCFAllocatorDefault,
@@ -251,6 +338,9 @@ mod macos {
         agg_name: &str,
         is_private: bool,
     ) -> Result<CFRetained<CFDictionary>, String> {
+        // SAFETY: `kCFAllocatorDefault` と CoreFoundation 標準の
+        // `kCFTypeDictionaryKeyCallBacks` / `kCFTypeDictionaryValueCallBacks` への
+        // 有効な静的参照を渡して可変辞書を作成する。
         let tap_inner = unsafe {
             CFMutableDictionary::new(
                 kCFAllocatorDefault,
@@ -265,6 +355,9 @@ mod macos {
         let key_drift = to_cfstring(kAudioSubTapDriftCompensationKey)?;
         let val_yes_drift = NSNumber::initWithBool(NSNumber::alloc(), true);
 
+        // SAFETY: `tap_inner` は `kCFTypeDictionary*CallBacks` で作成した可変辞書であり、
+        // キー（`CFString`）と値（Toll-Free Bridging 対象の `NSString` / `NSNumber`）は
+        // いずれも呼び出し中有効な CFType ポインタで、辞書側が `CFRetain` する。
         unsafe {
             CFMutableDictionary::set_value(
                 Some(tap_inner.as_ref()),
@@ -280,6 +373,9 @@ mod macos {
 
         let tap_inner_ptr: *const c_void = (&*tap_inner as *const CFMutableDictionary).cast();
         let taps_list = [tap_inner_ptr];
+        // SAFETY: `taps_list` は有効な CFType（`CFMutableDictionary`）のポインタ 1 要素の配列で、
+        // 要素数 `taps_list.len()` と一致し、`kCFTypeArrayCallBacks` により `CFArray::new` 内で
+        // 要素が `CFRetain` される（ポインタ配列自体は読み取りのみ）。
         let taps = unsafe {
             CFArray::new(
                 kCFAllocatorDefault,
@@ -290,6 +386,9 @@ mod macos {
         }
         .ok_or_else(|| "サブタップ配列の作成に失敗しました".to_string())?;
 
+        // SAFETY: `kCFAllocatorDefault` と CoreFoundation 標準の
+        // `kCFTypeDictionaryKeyCallBacks` / `kCFTypeDictionaryValueCallBacks` への
+        // 有効な静的参照を渡して可変辞書を作成する。
         let dict = unsafe {
             CFMutableDictionary::new(
                 kCFAllocatorDefault,
@@ -311,6 +410,10 @@ mod macos {
         let val_auto_start = NSNumber::initWithBool(NSNumber::alloc(), true);
         let val_is_private = NSNumber::initWithBool(NSNumber::alloc(), is_private);
 
+        // SAFETY: `dict` は `kCFTypeDictionary*CallBacks` で作成した可変辞書であり、
+        // 登録するキー（`CFString`）と値（`CFString` / `CFArray` / `NSNumber`）は
+        // いずれも呼び出し中有効な CFType ポインタで辞書側が `CFRetain` する。
+        // また `CFMutableDictionary` は `CFDictionary` のサブタイプのため `cast_unchecked` は安全。
         unsafe {
             CFMutableDictionary::set_value(
                 Some(dict.as_ref()),
@@ -350,6 +453,8 @@ mod macos {
         };
         let mut device_id: AudioDeviceID = 0;
         let mut data_size = mem::size_of::<AudioDeviceID>() as u32;
+        // SAFETY: `address` は有効なプロパティアドレス、qualifier は 0 バイト（NULL）、
+        // `device_id` は `data_size`（`size_of::<AudioDeviceID>()`）バイトの書き込み可能な領域である。
         let status = unsafe {
             AudioObjectGetPropertyData(
                 kAudioObjectSystemObject as AudioObjectID,
@@ -376,6 +481,9 @@ mod macos {
         };
         let mut cf_uid: *mut CFString = ptr::null_mut();
         let mut data_size = mem::size_of::<*mut CFString>() as u32;
+        // SAFETY: `device_id` は取得済みの出力デバイス ID、`address` は有効なプロパティアドレス、
+        // qualifier は 0 バイト（NULL）、`cf_uid` は `data_size`（`size_of::<*mut CFString>()`）
+        // バイトの書き込み可能な領域である。
         let status = unsafe {
             AudioObjectGetPropertyData(
                 device_id,
@@ -393,7 +501,8 @@ mod macos {
         }
         let non_null = NonNull::new(cf_uid)
             .ok_or_else(|| "CoreAudio デバイス UID が NULL でした".to_string())?;
-        // AudioObjectGetPropertyData は Create Rule で CFString を返すため +1 所有権を引き取る
+        // SAFETY: `AudioObjectGetPropertyData`（`kAudioDevicePropertyDeviceUID`）は成功時に
+        // Create Rule に従い +1 所有権を持つ有効な `CFString` を返し、`non_null` は非 NULL 確認済み。
         let uid = unsafe { CFRetained::from_raw(non_null) };
         Ok(uid.to_string())
     }
@@ -495,6 +604,7 @@ mod macos {
         let coreaudio_out_uid = device_uid(coreaudio_out_id)?;
 
         println!("=== tap_probe (T1b) ===");
+        println!("build_stamp: {BUILD_STAMP}");
         println!("default_output_device: {default_output_name}");
         println!("default_output_cpal_id: {default_output_cpal_id}");
         println!("default_output_coreaudio_id: {coreaudio_out_id}");
@@ -650,9 +760,14 @@ mod macos {
         let total_frames = capture.written_frames.load(Ordering::Acquire);
         let dropped_frames = capture.dropped_frames.load(Ordering::Relaxed);
         let stream_error = capture.stream_error.load(Ordering::Acquire);
+        let stream_error_kind =
+            decode_error_kind(capture.stream_error_kind.load(Ordering::Acquire));
+        let stream_error_count = capture.stream_error_count.load(Ordering::Relaxed);
         println!("total_frames: {total_frames}");
         println!("dropped_frames: {dropped_frames}");
         println!("stream_error: {stream_error}");
+        println!("stream_error_kind: {stream_error_kind}");
+        println!("stream_error_count: {stream_error_count}");
 
         match default_output.default_output_config() {
             Ok(after_cfg) => {
@@ -895,7 +1010,19 @@ mod macos {
                             .fetch_add(dropped, Ordering::Relaxed);
                     }
                 },
-                move |_err| {
+                move |err| {
+                    let kind_code = encode_error_kind(err.kind());
+                    match err_capture.stream_error_kind.compare_exchange(
+                        STREAM_ERROR_NONE,
+                        kind_code,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) | Err(_) => {}
+                    }
+                    err_capture
+                        .stream_error_count
+                        .fetch_add(1, Ordering::Relaxed);
                     err_capture.stream_error.store(true, Ordering::Release);
                 },
                 None,
