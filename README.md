@@ -1,8 +1,26 @@
-# SnipWave
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/snipwave-lockup-dark.svg">
+    <img src="assets/logo/snipwave-lockup-light.svg" alt="SnipWave" width="520">
+  </picture>
+</h1>
+
+<p align="center">
+  <img src="https://skillicons.dev/icons?i=rust,githubactions,apple,windows,linux&perline=12" alt="Rust, GitHub Actions, macOS, Windows, Linux">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Rust-1.93.0-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust 1.93.0">
+  <img src="https://img.shields.io/badge/egui-0.35.0-2168F2?style=flat-square" alt="egui 0.35.0">
+  <img src="https://img.shields.io/badge/cpal-0.18.2-2168F2?style=flat-square" alt="cpal 0.18.2">
+  <img src="https://img.shields.io/badge/macOS-14.6%2B-000000?style=flat-square&logo=apple&logoColor=white" alt="macOS 14.6+">
+</p>
+
+<!-- CI のバッジは、.github/workflows/ci.yml が main に入ってから足す（それまでは main の CI の結果が無い） -->
 
 PC で再生されているシステム音声（ループバック音声）を「遡りキャプチャ（Catch）」または「ライブ録音（Rec / Stop）」で取り込み、波形で範囲を選んで WAV（48kHz / 2ch、24-bit int または 32-bit float）に書き出す常駐型デスクトップアプリです。
 
-macOS だけ実機での動作を確認しています。Windows と Linux は CI でのビルド確認のみです。
+動作を手で確かめるのは macOS だけで、Windows と Linux は CI でのビルドの確認だけです。2026-11-25 の時点では、macOS でシステム音声が取れるかの確認（設計書の T1・T1b）はまだ済んでいません。
 
 ## 必要な環境
 
