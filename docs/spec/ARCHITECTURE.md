@@ -1,5 +1,7 @@
 # SnipWave アーキテクチャ設計メモ
 
+> 実装は詳細設計書 [`docs/design/detailed-design.md`](../design/detailed-design.md) に従う。このメモと食い違う所は詳細設計書を正とする。主な違い: 音声の受け取りはロックなしのキューとワーカースレッドで行う（§4.3）、再描画は常に 60fps では回さない（§5.8）、関数名は `snapshot_last` / `start_live` / `stop_live`（§4.9）。
+
 ## スレッド構成
 1. **Audio Capture Thread（OS別ループバック取得）**
    - 48kHz / 2ch / f32 でシステム音声を常時受信。
