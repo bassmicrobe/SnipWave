@@ -1057,7 +1057,12 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 
 ### T1. macOS でシステム音声が取れることの検証（最初にやる。ここが関門）
 
-- 担当ファイル: `Cargo.toml`（cpal と hound だけの最小）、`rust-toolchain.toml`、`.gitignore`、`examples/loopback_probe.rs`、`scripts/macos/probe-app.sh`、`packaging/macos/Info.ext.plist`、`README.md`（確かめた結果）、`docs/design/detailed-design.md`（§3.3 に確かめた結果）
+- 担当ファイル: `Cargo.toml`（cpal と hound だけの最小）、`Cargo.lock`、`rust-toolchain.toml`、`.gitignore`、`examples/loopback_probe.rs`、`scripts/macos/probe-app.sh`、`packaging/macos/Info.ext.plist`、`README.md`（確かめた結果）、`docs/design/detailed-design.md`（§3.3 に確かめた結果）
+- 実装上の決定:
+  - パッケージ名は `snipwave`。Cargo が examples のみのパッケージを受け付けることを確認したため、T1 では `src/main.rs` を置かず（T2 で `src/lib.rs`・`src/main.rs` を追加する）、`Cargo.lock` もコミットする。
+  - 3 OS で `cargo clippy --all-targets` が通るよう、`examples/loopback_probe.rs` は `#[cfg(target_os = "macos")]` で分け、macOS 以外では「macOS 専用です」と出して終了する。
+  - `scripts/macos/probe-app.sh` は `build`（組み立て＋ad-hoc 署名のみ、既定）と `run`（`open -W -n --stdout … --stderr …` による起動）を引数で分ける。ログと `probe.wav` は `target/probe/loopback/` の下の絶対パスに出力する（`--output` で指定。直接実行時も同じ場所を既定とする）。
+  - 出力デバイスのフォーマット記録について、`system_profiler SPAudioDataType` はサンプルレートとチャンネル数のみ取得できビット数は含まれない。そのため `probe-app.sh run` で起動前後の `system_profiler` 出力と差分をログに残し、ビット数は Audio MIDI 設定で目視確認する手順とする。
 - 作るもの: `loopback_probe` は、`cpal::default_host().default_output_device()` を §2.3 の決まり（既定の設定のまま）で開き、10 秒間、1 秒ごとに「届いたフレーム数・左右の最大値」を標準出力に出し、最後に `probe.wav`（デバイスのレートのまま）を書く。起動時にデバイス名・`supports_input()`・既定の設定（レート、チャンネル数、サンプル形式）も出す。**試験音**: 取得を始めて 2 秒後に、997 Hz・-12 dBFS・3 秒の正弦波の WAV（hound で一時フォルダに書く）を `afplay` で鳴らす。終わったら、試験音の区間と、その前の区間それぞれについて「997 Hz の成分（Goertzel）の振幅 ÷ (√2 × RMS)」を出す（純音だけなら 1.0 に近く、マイクの雑音や別の音なら小さい）。`probe-app.sh` は、`cargo build --example loopback_probe` のあと `Probe.app/Contents/{MacOS,Info.plist}` を手で組み（バンドル ID `com.snipwave.Probe`、`NSAudioCaptureUsageDescription` 入り）、`codesign --force --sign -` で ad-hoc 署名する。
 - 完了条件:
   0. 既定の出力デバイスが **出力だけのデバイス**（`supports_input()` が偽。内蔵スピーカーやヘッドホン）になっている。真なら cpal はマイク側を録るので T1 の判定にならない。出力先を切り替えてやり直す（入出力一体のデバイスは T1b で確かめる）。

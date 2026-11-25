@@ -1,0 +1,2 @@
+<key>NSAudioCaptureUsageDescription</key>
+<string>SnipWave は、PC で再生中の音声を取り込んで WAV に書き出すために、システムオーディオを録音します。</string>

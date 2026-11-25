@@ -1,0 +1,10 @@
+[package]
+name = "snipwave"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.93"
+resolver = "3"
+
+[dependencies]
+cpal = "0.18.2"
+hound = "3.5.1"
