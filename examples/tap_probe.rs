@@ -1012,13 +1012,18 @@ mod macos {
                 },
                 move |err| {
                     let kind_code = encode_error_kind(err.kind());
-                    match err_capture.stream_error_kind.compare_exchange(
-                        STREAM_ERROR_NONE,
-                        kind_code,
-                        Ordering::Release,
-                        Ordering::Relaxed,
-                    ) {
-                        Ok(_) | Err(_) => {}
+                    // 最初のエラー種別のみ 1 回だけ記録する（既に記録済みで Err になる場合は上書きしない）
+                    if err_capture
+                        .stream_error_kind
+                        .compare_exchange(
+                            STREAM_ERROR_NONE,
+                            kind_code,
+                            Ordering::Release,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        // 初回のエラー種別を記録した
                     }
                     err_capture
                         .stream_error_count

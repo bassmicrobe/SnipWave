@@ -1,4 +1,94 @@
-# SnipWave
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/snipwave-lockup-dark.svg">
+    <img src="assets/logo/snipwave-lockup-light.svg" alt="SnipWave" width="520">
+  </picture>
+</h1>
+
+<p align="center">
+  <img src="https://skillicons.dev/icons?i=rust,githubactions,apple,windows,linux&perline=12" alt="Rust, GitHub Actions, macOS, Windows, Linux">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Rust-1.93.0-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust 1.93.0">
+  <img src="https://img.shields.io/badge/egui-0.35.0-2168F2?style=flat-square" alt="egui 0.35.0">
+  <img src="https://img.shields.io/badge/cpal-0.18.2-2168F2?style=flat-square" alt="cpal 0.18.2">
+  <img src="https://img.shields.io/badge/macOS-14.6%2B-000000?style=flat-square&logo=apple&logoColor=white" alt="macOS 14.6+">
+</p>
+
+<!-- CI のバッジは、.github/workflows/ci.yml が main に入ってから足す（それまでは main の CI の結果が無い） -->
+
+PC で再生されているシステム音声（ループバック音声）を「遡りキャプチャ（Catch）」または「ライブ録音（Rec / Stop）」で取り込み、波形で範囲を選んで WAV（48kHz / 2ch、24-bit int または 32-bit float）に書き出す常駐型デスクトップアプリです。
+
+動作を手で確かめるのは macOS だけで、Windows と Linux は CI でのビルドの確認だけです。2026-11-25 の時点では、macOS でシステム音声が取れるかの確認（設計書の T1・T1b）はまだ済んでいません。
+
+## 必要な環境
+
+- **Rust ツールチェーン**: `1.93.0`（`rust-toolchain.toml` で固定、`rustfmt`・`clippy` を含む）
+- **対応 OS**:
+  - **macOS 14.6 以上**: Core Audio Process Tap を使用（システム音声取得には `.app` バンドル経由での起動と「システムオーディオ録音」の許可が必要）
+  - **Windows 10 / 11**: WASAPI Loopback を使用
+  - **Linux**: PipeWire または PulseAudio が必要（ALSA のみではシステム音声を取り込めません。Wayland 環境ではホットキーが使えない場合があり、ボタンとトレイから操作します）
+- **macOS `.app` バンドル作成ツール（任意）**: `cargo-bundle 0.12.0`
+
+```sh
+cargo install cargo-bundle --version 0.12.0 --locked
+```
+
+### Linux で必要なシステムパッケージ
+
+Ubuntu 24.04 での導入例です。`tray-icon` は `ksni`、`rfd` は xdg-portal を使う構成のため GTK（`libgtk-3-dev`）は不要です。
+
+```sh
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+  pkg-config libclang-dev \
+  libasound2-dev libpipewire-0.3-dev libpulse-dev \
+  libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
+  libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+```
+
+| パッケージ | 用途 |
+|---|---|
+| `libasound2-dev` | `cpal`（PipeWire / PulseAudio 利用時も必要） |
+| `libpipewire-0.3-dev`、`libclang-dev` | `cpal` の `pipewire`（`bindgen` が `libclang` を使用） |
+| `libpulse-dev` | `cpal` の `pulseaudio` |
+| `libxkbcommon-dev`、`libwayland-dev`、`libgl1-mesa-dev`、`libxcb-render0-dev`、`libxcb-shape0-dev`、`libxcb-xfixes0-dev` | `eframe`（`winit` / `glow`） |
+| `pkg-config` | 上記ライブラリの検出 |
+
+## ビルド・実行手順
+
+開発ビルド:
+
+```sh
+cargo build --locked
+```
+
+起動（画面確認用）:
+
+```sh
+cargo run --locked
+```
+
+リリースビルド:
+
+```sh
+cargo build --release --locked
+```
+
+フォーマット・lint・テスト（CI と同じコマンド）:
+
+```sh
+cargo fmt --all --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+```
+
+## 免責事項
+
+本ツールは個人の音楽制作・学習・検証用途を想定しています。YouTube、Netflix等の外部サービスから取得した音声の利用については、各サービスの利用規約および著作権法を遵守してください。
+
+---
 
 ## macOS 音声取得プローブ（検証用）
 
