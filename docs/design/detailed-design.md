@@ -79,7 +79,9 @@ PC で鳴っている音（システム音声）を取り込み、波形で範�
 | ログ | `log` 0.4.35 / `env_logger` 0.11.12 | — | — | 1.85 | 標準エラーへ。画面の状態表示の代わりにはしない |
 | Windows の exe アイコン | `winresource` | 0.1.34 | — | 記載なし | `[target.'cfg(windows)'.build-dependencies]` |
 | テスト用 | `tempfile` | 3.27.0 | — | 1.63 | dev-dependency |
-| macOS の自前の Tap（T7b） | `objc2` 0.6.5 / `objc2-core-audio` 0.3.2 / `objc2-core-foundation` 0.3.2 / `objc2-foundation` 0.3.2 | — | — | 1.71 | `[target.'cfg(target_os = "macos")'.dependencies]`。features は cpal 0.18.2 の `Cargo.toml` と同じ（`objc2-core-audio`: `std`, `AudioHardware`, `AudioHardwareDeprecated`, `objc2`, `objc2-foundation`、`objc2-foundation`: `std`, `NSArray`, `NSString`, `NSValue`、どちらも `default-features = false`）。T2 で入れる |
+| macOS の自前の Tap（T7b） | `objc2` 0.6.5 / `objc2-core-audio` 0.3.2 / `objc2-core-foundation` 0.3.2 / `objc2-foundation` 0.3.2 / `libc` 0.2.191 | — | — | 1.71 | `[target.'cfg(target_os = "macos")'.dependencies]`。features は cpal 0.18.2 の `Cargo.toml` と同じ（`objc2-core-audio`: `std`, `AudioHardware`, `AudioHardwareDeprecated`, `objc2`, `objc2-foundation`、`objc2-foundation`: `std`, `NSArray`, `NSString`, `NSValue`、どちらも `default-features = false`）。`libc` は残骸の判定（`kill(pid, 0)`）に使う。1.0 は alpha なので 0.2 系にする。T2 で入れる |
+| macOS の Dock からの再表示（§12-12） | `objc2-app-kit` | 0.3.2 | — | 1.71 | `[target.'cfg(target_os = "macos")'.dependencies]`、`default-features = false`。features は `std` と `NSApplication`・`NSResponder` を出発点にし、`NSApplicationDelegate` が使えるものを docs.rs の 0.3.2 で確かめて足す。T2 で入れる |
+| Linux で X11 を指定する（§12-13） | `winit` | 0.30.13 | — | — | `[target.'cfg(target_os = "linux")'.dependencies]`、`default-features = false`、features = `x11`。eframe 0.35.0 が使う版と同じにする（`Cargo.lock` で 1 つにまとまることを確かめる）。`winit::platform::x11::EventLoopBuilderExtX11` を使うためだけに入れる。T2 で入れる |
 | `.app` を作る道具 | `cargo-bundle` | 0.12.0 | 2026-09-20 | 記載なし | `cargo install` で入れる開発ツール（依存には足さない）。§3.3 |
 
 採らなかったもの:
@@ -207,6 +209,7 @@ scripts/gen-icons.sh              # SVG から各 OS のアイコンを作る
 assets/icons/…                    # 生成物（コミットする。§6）
 assets/fonts/NotoSansJP-Regular.ttf + OFL.txt
 examples/loopback_probe.rs        # T1 の検証（残しておく。取得の切り分けに使う）
+examples/playback_probe.rs        # T8 の検証（試聴とループ）
 examples/tap_probe.rs             # T1b の検証（macOS 専用。CI の clippy --all-targets が 3 OS で通るよう、
                                   #   macOS 以外では「macOS 専用です」と出して終わる main を cfg で用意する）
 src/
@@ -217,6 +220,7 @@ src/
   export.rs          # WAV 書き出し、ファイル名
   hotkeys.rs         # グローバルホットキーの登録とイベント
   tray.rs            # トレイのアイコンとメニュー
+  macos_reopen.rs    # macOS だけ。Dock のアイコンを押したらウィンドウを戻す（§5.7、§12-12）
   audio/
     mod.rs           # 定数（SAMPLE_RATE など）と再公開
     ring.rs          # RingBuffer（300 秒の循環バッファ）
@@ -407,7 +411,8 @@ pub struct TapAggregate { /* Tap と集約デバイスの AudioObjectID、集約
 
 impl TapAggregate {
     /// 既定の出力デバイスを対象に、全プロセスの Tap（ミュートしない）と、
-    /// それを入れた公開の集約デバイス `SnipWave Loopback <pid>` を作る。
+    /// それを入れた集約デバイス `SnipWave Loopback <pid>` を作る。非公開（`kAudioAggregateDeviceIsPrivateKey` = YES）で作り、
+    /// cpal の `devices()` に出なければ公開で作り直す（どちらにするかは T1b の結果で決めて固定する。§12-14）。
     pub fn create_for_default_output() -> Result<Self, AppError>;
     /// cpal の `host.devices()` から探すときの名前。
     pub fn device_name(&self) -> &str;
@@ -622,6 +627,19 @@ impl Tray {
 }
 ```
 
+**`macos_reopen.rs`**（macOS だけ。`lib.rs` で `#[cfg(target_os = "macos")] pub mod macos_reopen;`）
+
+```rust
+/// 自前の NSApplicationDelegate（`applicationShouldHandleReopen:hasVisibleWindows:` だけを持つ）を登録する。
+/// Dock のアイコンが押されたら `on_reopen` を呼ぶ（呼ばれた側は AppAction の ShowWindow を送る）。
+/// winit は自分ではデリゲートを登録しないと保証している（winit 0.30.13 の `src/platform/macos.rs` の説明）。
+/// `NSApplication::sharedApplication` は eframe のイベントループができたあと（アプリ生成のクロージャの中）で呼ぶ。
+/// 戻り値のデリゲートは、アプリが生きている間持っておく（捨てると登録が外れる）。
+/// winit の説明の例は objc2 0.5 の `declare_class!` だが、0.6 では `define_class!` に変わっている。docs.rs の 0.6.5 で確かめて書く。
+pub fn install(on_reopen: impl Fn() + 'static) -> Result<ReopenDelegate, AppError>;
+pub struct ReopenDelegate { /* Retained<自前のデリゲート> */ }
+```
+
 **`ui/app.rs`**
 
 ```rust
@@ -804,6 +822,8 @@ pub fn selection_from_drag(anchor_frame: usize, current_frame: usize, total_fram
 - 表示に戻す: トレイのアイコンの左クリック、メニューの「ウィンドウを表示」、ホットキーでの取り込み。`Visible(true)` と `Focus` を送る。
 - 終了: トレイのメニューの「終了」。`quitting = true` にして `ViewportCommand::Close` を送る（`quitting` のときは閉じる要求を取り消さない）。終了時は、試聴を止め、`engine.shutdown()` を呼ぶ。録音中だったぶんは捨てる。
 - **トレイを作れなかったとき**（Linux でトレイの受け側が無い、など）: 起動時に状態表示へ注意を出し、ウィンドウを閉じたらアプリを終了する（隠したまま戻せなくなるのを防ぐ）。
+- **macOS の Dock**（§12-12）: Dock に出す（`LSUIElement` は付けない）。隠している間に Dock のアイコンが押されたら、`macos_reopen.rs` のデリゲートが受けて、表示に戻す（`Visible(true)` と `Focus`）。
+- **Linux の Wayland**（§12-13）: winit 0.30.13 は Wayland でウィンドウを隠せない（`set_visible` が何もしない）。そこで `main.rs` で、環境変数 `DISPLAY` があれば `NativeOptions::event_loop_builder` に `EventLoopBuilderExtX11::with_x11()` を入れ、Wayland の環境でも X11（XWayland）で窓を開く。`DISPLAY` が無い（XWayland が無い）ときは Wayland のまま開き、「トレイを作れなかったとき」と同じく、閉じたら終了する（起動時に状態表示へ理由を出す）。Linux は CI のビルドしか確かめない（R5）ので、この分岐は README に書いておく。
 - macOS の ⌘Q は終了として扱う（隠さない）。T10 で実際の動きを確かめ、閉じる要求と区別できなければ、ウィンドウ内のキー入力で ⌘Q を拾って `quitting = true` にする。
 
 ### 5.8 状態表示・エラー表示・再描画
@@ -1029,12 +1049,14 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 
 順番: T1 → T1b → T2 →（T3・T4・T5・T6 は並行できる）→ T7・T8（並行できる）→ T7b（T7 のあと。T9 以降と並行できる）→ T9 → T10・T11（並行できる）→ T12。
 
+**手での確認の分担**（設計上の判断）: 手での確認のうち、機械で読めるもの（標準出力の数値、ファイルの有無、`plutil -p`、スクリーンショット）は実装者が行う。人の操作や五感が要るもの（許可のダイアログを押す、耳で聞く、機器の抜き差し・出力先の切り替え、DAW で開く、ホットキーを押す、30 分の連続稼働を見守る、見た目のはみ出しを見る）は、実装者がその手前で止め、手順と確かめる点を取りまとめ役に渡す。取りまとめ役がまとめて依頼者に頼む。実装者は、自分で確かめていない項目を「確かめた」と報告しない。
+
 **CI の回し方**: 実装者はコミットまでを行い、「CI 待ち」と報告する。push と PR の作成は取りまとめ役が行う（ブランチ `feat/mvp-v0.1` → `main` の PR 1 つ。マージはしない。§13）。完了条件の「CI で通る」は、取りまとめ役が push したあとの結果で判定する。失敗したら、実装者は失敗したジョブのログをすべて受け取ってから直す。CI の結果を待つ間に、担当ファイルが重ならない次のタスクへ進んでよい。
 並行できるタスクは、担当ファイルが重ならない。`Cargo.toml` は T2 で §2.2 の依存をすべて入れ、あとのタスクでは触らない（触る必要が出たら取りまとめ役に知らせる）。
 
 ### T1. macOS でシステム音声が取れることの検証（最初にやる。ここが関門）
 
-- 担当ファイル: `Cargo.toml`（cpal と hound だけの最小）、`rust-toolchain.toml`、`.gitignore`、`examples/loopback_probe.rs`、`scripts/macos/probe-app.sh`、`packaging/macos/Info.ext.plist`
+- 担当ファイル: `Cargo.toml`（cpal と hound だけの最小）、`rust-toolchain.toml`、`.gitignore`、`examples/loopback_probe.rs`、`scripts/macos/probe-app.sh`、`packaging/macos/Info.ext.plist`、`README.md`（確かめた結果）、`docs/design/detailed-design.md`（§3.3 に確かめた結果）
 - 作るもの: `loopback_probe` は、`cpal::default_host().default_output_device()` を §2.3 の決まり（既定の設定のまま）で開き、10 秒間、1 秒ごとに「届いたフレーム数・左右の最大値」を標準出力に出し、最後に `probe.wav`（デバイスのレートのまま）を書く。起動時にデバイス名・`supports_input()`・既定の設定（レート、チャンネル数、サンプル形式）も出す。**試験音**: 取得を始めて 2 秒後に、997 Hz・-12 dBFS・3 秒の正弦波の WAV（hound で一時フォルダに書く）を `afplay` で鳴らす。終わったら、試験音の区間と、その前の区間それぞれについて「997 Hz の成分（Goertzel）の振幅 ÷ (√2 × RMS)」を出す（純音だけなら 1.0 に近く、マイクの雑音や別の音なら小さい）。`probe-app.sh` は、`cargo build --example loopback_probe` のあと `Probe.app/Contents/{MacOS,Info.plist}` を手で組み（バンドル ID `com.snipwave.Probe`、`NSAudioCaptureUsageDescription` 入り）、`codesign --force --sign -` で ad-hoc 署名する。
 - 完了条件:
   0. 既定の出力デバイスが **出力だけのデバイス**（`supports_input()` が偽。内蔵スピーカーやヘッドホン）になっている。真なら cpal はマイク側を録るので T1 の判定にならない。出力先を切り替えてやり直す（入出力一体のデバイスは T1b で確かめる）。
@@ -1046,10 +1068,10 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 
 ### T1b. 自前の Tap が cpal から開けることの検証（T1 のあと。ここも関門）
 
-§12-5 で入出力一体のデバイスへの対応を v0.1 に入れると決めたが、その方式（§11 R1 の代替 A: 自前の Tap ＋ 公開の集約デバイスを cpal から名前で開く）は、まだ動くと確かめていない。T2 以降を積む前に、最小の形で確かめる。
+§12-5 で入出力一体のデバイスへの対応を v0.1 に入れると決めたが、その方式（§11 R1 の代替 A: 自前の Tap ＋ 集約デバイスを cpal から名前で開く）は、まだ動くと確かめていない。T2 以降を積む前に、最小の形で確かめる。
 
-- 担当ファイル: `examples/tap_probe.rs`、`Cargo.toml`（T1 の最小の依存に、§2.2 の「macOS の自前の Tap」の行を足す。T2 の前なので触ってよい）、`scripts/macos/probe-app.sh`（`tap_probe` の `.app` も作れるようにする）
-- 作るもの: `tap_probe` は、`objc2-core-audio` で既定の出力デバイスを対象に Tap（全プロセス、ミュートしない）と、それを入れた公開の集約デバイス `SnipWave Loopback <pid>` を作り、`cpal::default_host().devices()` から名前で探して `build_input_stream` で開く。あとは T1 の `loopback_probe` と同じ（10 秒取得、試験音、997 Hz の割合、`probe.wav`）。終わったら集約デバイスと Tap を破棄し、Audio MIDI 設定に残っていないことを確かめる。手順の手本は cpal-0.18.2 の `src/host/coreaudio/macos/loopback.rs`。
+- 担当ファイル: `examples/tap_probe.rs`、`Cargo.toml`（T1 の最小の依存に、§2.2 の「macOS の自前の Tap」の行を足す。T2 の前なので触ってよい）、`scripts/macos/probe-app.sh`（`tap_probe` の `.app` も作れるようにする）、`README.md` と `docs/design/detailed-design.md`（確かめた結果。T1 のあとなので重ならない）
+- 作るもの: `tap_probe` は、`objc2-core-audio` で既定の出力デバイスを対象に Tap（全プロセス、ミュートしない）と、それを入れた集約デバイス `SnipWave Loopback <pid>` を作り、`cpal::default_host().devices()` から名前で探して `build_input_stream` で開く。**まず非公開**（`kAudioAggregateDeviceIsPrivateKey` = YES。作ったプロセスからだけ見える）で作って `devices()` に出るかを確かめ、出なければ公開で作り直す（§12-14）。どちらで通ったかを報告し、T7b はその作り方に固定する。あとは T1 の `loopback_probe` と同じ（10 秒取得、試験音、997 Hz の割合、`probe.wav`）。終わったら集約デバイスと Tap を破棄し、Audio MIDI 設定に残っていないことを確かめる。手順の手本は cpal-0.18.2 の `src/host/coreaudio/macos/loopback.rs`。
 - 完了条件:
   1. **入出力一体のデバイスが既定の出力**（`supports_input()` が真）の状態で、T1 の完了条件 1・2 と同じ結果になる。依頼者のオーディオインターフェイスをつないで試す。手元に無ければ、Audio MIDI 設定で「機器セット」（スピーカー＋マイク）を作って既定の出力にする。
   2. 取得のあと、`SnipWave Loopback` の集約デバイスが残っていない。
@@ -1059,7 +1081,7 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 
 ### T2. 骨組みと CI
 
-- 担当ファイル: `Cargo.toml`（§2.2 の全依存、`description`、`[lints]`、`[package.metadata.bundle]`）、`Cargo.lock`、`clippy.toml`、`build.rs`、`.github/workflows/ci.yml`、`src/lib.rs`、`src/main.rs`、`src/error.rs`、`src/audio/mod.rs`（定数）、各モジュールの空のファイル（§4.6 の型とシグネチャだけ。中身は `todo!()` ではなく、コンパイルが通る最小の仮の戻り値）、`README.md`（ビルド手順）
+- 担当ファイル: `Cargo.toml`（§2.2 の全依存、`description`、`[lints]`、`[package.metadata.bundle]`）、`Cargo.lock`、`clippy.toml`、`build.rs`、`.github/workflows/ci.yml`、`src/lib.rs`、`src/main.rs`、`src/error.rs`、`src/audio/mod.rs`（定数）、各モジュールの空のファイル（§4.6 の型とシグネチャだけ。中身は `todo!()` ではなく、コンパイルが通る最小の仮の戻り値）、`README.md`（ビルド手順）、`docs/design/detailed-design.md`（§8 の Linux のパッケージの表を、最初の CI の結果で直すとき）
 - 完了条件: 3 OS の CI（fmt・clippy・test・release ビルド）が通る。macOS で空のウィンドウが開く。
 - 確かめ方: PR の CI。ウィンドウは `cargo run` で 1 回見る。
 - 補足: アイコンのファイルは T6 で入るので、この時点の `build.rs` と `with_icon` はアイコンなしで通るようにしておく（T6 で有効にする）。
@@ -1084,23 +1106,23 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 
 ### T6. 配色・フォント・アイコン（並行可）
 
-- 担当ファイル: `src/ui/theme.rs`、`src/ui/text.rs`、`scripts/gen-icons.sh`、`assets/icons/**`、`assets/fonts/**`
+- 担当ファイル: `src/ui/theme.rs`、`src/ui/text.rs`、`scripts/gen-icons.sh`、`assets/icons/**`、`assets/fonts/**`、`build.rs`（exe のアイコンを有効にする）、`src/main.rs`（`with_icon` を有効にし、`debug_swatches` を一時的に呼ぶ。T3〜T5 は `main.rs`・`build.rs` を触らないので重ならない。`main.rs` は T9 に引き継ぐ）
 - 作るもの: §5.9 のトークンと `Visuals`、フォントの読み込み、§6 のアイコン一式。Noto Sans JP は Google Fonts の配布物（`https://github.com/google/fonts/tree/main/ofl/notosansjp`）から、太さが 1 つの Regular の TTF と `OFL.txt` を入れる。可変フォントしか無ければ、`https://github.com/notofonts/noto-cjk` の配布物から取る。入れたファイルの出どころと版を README に書く。
 - 完了条件: ダークとライトで日本語の文言が豆腐にならずに出る。`icon.icns`・`icon.ico`・各 PNG が生成されてコミットされている。
 - 確かめ方: `theme.rs` の末尾に、全トークンと文字の大きさを並べて見せる関数 `debug_swatches(ui)` を用意し、T9 までの間は `main.rs` から呼んで目で見る（ダーク / ライトを 1 回ずつ）。アイコンは Finder のプレビューで見る。
 
 ### T7. 取得とエンジン（T3 のあと。T8 と並行可）
 
-- 担当ファイル: `src/audio/capture.rs`、`src/audio/engine.rs`
+- 担当ファイル: `src/audio/capture.rs`、`src/audio/engine.rs`、`examples/loopback_probe.rs`（確かめ方のために書き換える）
 - 完了条件: `.app` で起動して音を鳴らすと、`status()` が `Running` になり、`peak_levels()` が動き、`snapshot_last(5)` で 5 秒ぶんが取れる。出力デバイスを切り替える（スピーカー ↔ ヘッドホン）と、数秒以内に取得が戻る。
 - 確かめ方: `examples/loopback_probe.rs` を `AudioEngine` を使う形に書き換え（T1 の役目は終わっているので置き換えてよい）、5 秒ごとに状態・レベル・捨てたフレーム数を出し、30 秒後に `snapshot_last(10)` を `probe.wav` に書く。`probe-app.sh` の `.app` で 1 回動かす。
 
 ### T7b. macOS の入出力一体デバイスへの対応（T7 のあと。§12-5 の決定で v0.1 に入れる）
 
 - 担当ファイル: `src/audio/capture_macos_tap.rs`（T2 の骨組みに中身を書く）、`src/audio/capture.rs`（macOS の分岐 1 か所）。依存（§2.2 の「macOS の自前の Tap」の行）は T2 で `Cargo.toml` に入っているので、このタスクでは `Cargo.toml` を触らない。README は T11 と重なるので触らない（対応するデバイスの説明は報告に書き、README への反映は T12 で行う）
-- 作るもの: §11 R1 の代替 A。T1b の `examples/tap_probe.rs` で確かめた手順を、§4.6 の `TapAggregate` の形に移す。cpal-0.18.2 の `src/host/coreaudio/macos/loopback.rs` を手本に、Tap（全プロセス、ミュートしない）と、その Tap を入れた集約デバイス（名前 `SnipWave Loopback <pid>`、非公開にしない）を作る。`host.devices()` から名前で探し、普通の入力デバイスとして `build_input_stream` で開く。ストリームを捨てるとき・終了時に集約デバイスと Tap を破棄し、起動時に `SnipWave Loopback` で始まる残骸があれば破棄する。
+- 作るもの: §11 R1 の代替 A。T1b の `examples/tap_probe.rs` で確かめた手順を、§4.6 の `TapAggregate` の形に移す。cpal-0.18.2 の `src/host/coreaudio/macos/loopback.rs` を手本に、Tap（全プロセス、ミュートしない）と、その Tap を入れた集約デバイス（名前 `SnipWave Loopback <pid>`。公開か非公開かは T1b で決まった方）を作る。`host.devices()` から名前で探し、普通の入力デバイスとして `build_input_stream` で開く。ストリームを捨てるとき・終了時に集約デバイスと Tap を破棄する。残骸の破棄（`destroy_stale_aggregates`）は、`capture.rs` の macOS の分岐の中で、プロセスごとに 1 回だけ（`std::sync::Once`）呼ぶ（`main.rs` からは呼ばない。モジュールが非公開のため）。名前の `<pid>` のプロセスが生きているもの（`libc::kill(pid, 0)` が成功する、または自分の pid）は消さない。
 - 完了条件: 入力も持つデバイスを既定の出力にした状態で、T7 と同じ確認（最大値が 0 より大きい、`snapshot_last` に鳴らした音が入る）が通る。出力だけのデバイスでの動きが変わっていない。
-- 確かめ方: T7 の `loopback_probe` を `.app` で 1 回。入出力一体のデバイスが手元に無いときは、Audio MIDI 設定で「機器セット」（スピーカー＋マイク）を作って既定の出力にして試す。それでも `supports_input()` が真にならなければ、確かめられなかったこととして報告する。
+- 確かめ方: T7 の `loopback_probe` を `.app` で 1 回。T1b で使ったのと同じ入出力一体のデバイス（依頼者のオーディオインターフェイス、または機器セット）で確かめる。用意できないときは先へ進まず、取りまとめ役へ報告する（T1b と同じ扱い）。
 
 ### T8. 試聴（T3 のあと。T7 と並行可）
 
@@ -1110,14 +1132,14 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 
 ### T9. 画面（T3〜T8 のあと）
 
-- 担当ファイル: `src/ui/app.rs`、`src/ui/state.rs`、`src/ui/header.rs`、`src/ui/controls.rs`、`src/ui/waveform.rs`、`src/ui/edit_bar.rs`、`src/ui/settings.rs`、`src/ui/status_bar.rs`、`src/ui/mod.rs`、`src/main.rs`
+- 担当ファイル: `src/ui/app.rs`、`src/ui/state.rs`、`src/ui/header.rs`、`src/ui/controls.rs`、`src/ui/waveform.rs`、`src/ui/edit_bar.rs`、`src/ui/settings.rs`、`src/ui/status_bar.rs`、`src/ui/mod.rs`、`src/main.rs`（§5.7 の Linux の X11 の指定もここで入れる）
 - 完了条件: §9 の 13・14 が CI で通る。手で（`.app`）: Catch → 波形 → ドラッグで範囲 → 試聴（ループ）→ 書き出し → 書き出した WAV が DAW かプレーヤーで開ける。Rec → Stop でも同じ。設定を変えて再起動すると残っている。出力先を書き込めないフォルダにすると、エラーが状態表示に出る。
 - 確かめ方: CI と、上の手順を 1 回。ダークとライト、ウィンドウの幅 760 と 1440 で、はみ出しや重なりが無いかを 1 回見る。
 
 ### T10. トレイとホットキー（T9 のあと。T11 と並行可）
 
-- 担当ファイル: `src/tray.rs`、`src/hotkeys.rs`（`src/ui/app.rs` への組み込みは T9 で `AppAction` の受け口を作ってあるので、`SnipWaveApp::new` の中の生成の 1 か所だけを足す）
-- 完了条件（macOS、`.app`）: × で隠れる → トレイから戻る／隠した状態で Ctrl+Alt+C を押すと取り込まれてウィンドウが前に出る／Ctrl+Alt+R で録音が始まり、もう一度で止まって取り込まれる／トレイの「終了」と ⌘Q で終了する／ほかのアプリが使っているキーを `config.toml` に書くと、状態表示に登録の失敗が出る。
+- 担当ファイル: `src/tray.rs`、`src/hotkeys.rs`、`src/macos_reopen.rs`（`src/ui/app.rs` への組み込みは T9 で `AppAction` の受け口を作ってあるので、`SnipWaveApp::new` の中の生成の 1 か所を足す。§5.7 の ⌘Q をウィンドウ内のキー入力で拾う必要が出たときは、その処理も `app.rs` に足してよい。T11 は `app.rs` を触らないので重ならない）
+- 完了条件（macOS、`.app`）: × で隠れる → トレイから戻る／隠した状態で Dock のアイコンを押すと戻る／隠した状態で Ctrl+Alt+C を押すと取り込まれてウィンドウが前に出る／Ctrl+Alt+R で録音が始まり、もう一度で止まって取り込まれる／トレイの「終了」と ⌘Q で終了する／ほかのアプリが使っているキーを `config.toml` に書くと、状態表示に登録の失敗が出る。
 - 確かめ方: 上を 1 回ずつ。Windows と Linux は CI のビルドだけ。README は T11 と重なるので、このタスクでは触らない（確かめた結果は報告に書き、README への反映は T12 で行う）。
 
 ### T11. macOS の `.app`（T9 のあと。T10 と並行可）
@@ -1138,7 +1160,7 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 
 | # | リスク | 起きたときの見え方 | 備え・代替案 |
 |---|---|---|---|
-| R1 | macOS で、入出力が一体のデバイス（USB オーディオインターフェイスなど）が既定の出力のとき、cpal はループバックにならない（§2.3-2） | マイク側の音が入る、または無音 | 代替 A: `objc2-core-audio` 0.3.2 で Tap と集約デバイスを自分で作り（cpal の `loopback.rs` と同じ手順、約 200 行）、集約デバイスを非公開にせず名前を付けて、cpal の `devices()` から名前で探して普通の入力として開く。終了時と起動時（残骸）に破棄する。§12-5 の決定で v0.1 に入れる（T7b） |
+| R1 | macOS で、入出力が一体のデバイス（USB オーディオインターフェイスなど）が既定の出力のとき、cpal はループバックにならない（§2.3-2） | マイク側の音が入る、または無音 | 代替 A: `objc2-core-audio` 0.3.2 で Tap と集約デバイスを自分で作り（cpal の `loopback.rs` と同じ手順、約 200 行）、集約デバイスに名前を付けて（まず非公開、cpal から見えなければ公開。§12-14）、cpal の `devices()` から名前で探して普通の入力として開く。終了時と起動時（残骸）に破棄する。§12-5 の決定で v0.1 に入れる（T7b） |
 | R2 | macOS 27 で cpal のループバックが動かない、または権限が通らない | T1 で最大値が 0 のまま | 代替 B: `screencapturekit` 12.0.0（macOS 13 以上で音声を取れる。画面収録の許可が要る）。代替 A も試す。T1 で止めて報告 |
 | R3 | ad-hoc 署名では、作り直すたびに許可が外れる | 作り直すと無音になる | 自己署名の証明書で署名する（§3.3）。T1 で確かめる |
 | R4 | Windows の WASAPI ループバックは、何も鳴っていない間はデータが来ない可能性がある | 「直前 30 秒」が、無音の時間を飛ばした 30 秒になる | v0.1 は「届いた音の直前 N 秒」として扱い、README に書く。直すなら、ワーカーで時刻の差ぶんの無音を足す |
@@ -1156,7 +1178,7 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 
 ## 12. 依頼者の決定（2026-11-25）
 
-仕様に書かれておらず、答えで作るものが変わるものを、2026-11-25 に依頼者が決めた。11 件ともこの表の「決定」のとおり。本文はこの決定で書いてある。
+仕様に書かれておらず、答えで作るものが変わるものを、2026-11-25 に依頼者が決めた。14 件ともこの表の「決定」のとおり（12〜14 は、設計書の読み返しで見つかったもの）。本文はこの決定で書いてある。
 
 | # | 決めたこと | 決定 | 理由 | 反映した所 |
 |---|---|---|---|---|
@@ -1171,6 +1193,9 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 | 9 | ホットキーで取り込んだあとの動き | **ウィンドウを表示して前面に出す** | 取り込みの次にすることは範囲選びなので、すぐ編集に入れる。裏で溜めるだけにする案は、複数クリップの保持が要るので v0.1 の範囲を超える | §5.2 |
 | 10 | 書き出していないクリップがあるときに、次の Catch / Rec をした場合 | **確認せずに置き換える** | ホットキーの操作を確認のダイアログで止めない。Catch は撮り直しが利かないので、止めないほうを優先する | §4.7 |
 | 11 | 画面の言語 | **日本語**（Noto Sans JP を埋め込む。実行ファイルが数 MB 増える） | 利用者が日本語話者で、エラーの文を読めることが大事。文言は `ui/text.rs` にまとめるので、英語への切り替えは後からでもできる | §5.9、T6 |
+| 12 | macOS で、隠している間に Dock のアイコンを押したとき | **Dock に出し、押したらウィンドウを戻す** | ふつうの Mac アプリと同じ動きで、⌘Tab でも切り替えられる | §2.2、§4.6 `macos_reopen.rs`、§5.7、T10 |
+| 13 | Linux の Wayland で × を押したとき（Wayland では隠せない） | **X11（XWayland）で動かす**。XWayland が無ければ、閉じたら終了する | 隠す・トレイから戻すを X11 と同じに動かせる | §2.2、§5.7、T9 |
+| 14 | 入出力一体のデバイス用の集約デバイス `SnipWave Loopback` が、ほかのアプリから見えること | **まず見えない作り方（非公開）を試し、cpal で開けなければ公開でよい**（起動中は DAW や Audio MIDI 設定の入力の一覧に出る） | オーディオインターフェイス対応（§12-5）を優先する | §4.6 `TapAggregate`、T1b、T7b、§11 R1 |
 
 ---
 
@@ -1184,6 +1209,7 @@ GTK（`libgtk-3-dev`）は入れない。`tray-icon` は `ksni`、`rfd` は xdg-
 - 失敗を捨てない（§7）。`let _ =` と `.ok()` で `Result` を消さない。
 - 音声コールバックの中で、ロック・メモリ確保・ログ出力をしない（§4.3）。
 - 仕様や決まりが変わったら、`docs/`（この設計書と `docs/spec/`）と README を同じ作業で直す。依存を足す・版を変えるときは、§2.2 の表と README も直す。
+- 依存を足す・版を変えたら、報告に `Cargo.lock` の実際の版を書く。取りまとめ役が Notion の「SnipWave の仕様と依存パッケージ」のページ（`~/.claude/docs/notion-project-pages.md`）を直す。仕様・決定事項を変えたときも同じ。
 - README を直すときの装飾（アイコン、バッジ）は取りまとめ役が行う。本文（手順、版、コマンド）は実態と合わせて書く。
 - git の commit はタスクごと。実装者は commit までで、push・PR・マージはしない。
 - ブランチと PR（2026-11-25 依頼者の決定）: 実装はブランチ `feat/mvp-v0.1`（`docs/detailed-design` から作る）で行う。push と、`main` への PR（1 つ。設計書のコミットも含む）の作成は取りまとめ役が行い、タスクごとに push して CI を見る。CI が通ったところで止め、**マージは依頼者の指示があるまでしない**。
